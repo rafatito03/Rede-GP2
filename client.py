@@ -25,7 +25,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         
         dados_recebidos = s.recv(1024)
         
-        print(f"Resposta recebida do servidor: '{dados_recebidos.decode()}'")
+        print(f"Resposta recebida: '{dados_recebidos.decode()}'")
 
     except ConnectionRefusedError:
         print("Falha na conexão. O servidor parece estar offline ou recusou a conexão.")
