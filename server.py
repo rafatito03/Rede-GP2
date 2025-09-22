@@ -34,7 +34,6 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             print(f"Modo de Operação acordado: {modo_operacao}")
             print(f"Tamanho Máximo da Comunicação: {tamanho_maximo} caracteres")
             
-            # 4. Envia uma mensagem de confirmação de volta para o cliente
             resposta = "CONFIRMADO: Handshake recebido e parâmetros definidos."
             conn.sendall(resposta.encode())
 
