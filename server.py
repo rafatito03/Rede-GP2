@@ -11,11 +11,11 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     # Vincula o socket ao endereço e porta definidos
     s.bind((HOST, PORT))
     
-    # Coloca o servidor em modo de escuta, pronto para aceitar conexões
+    # Coloca o servidor em modo de await
     s.listen()
     print(f"Servidor pronto e escutando em {HOST}:{PORT}")
     
-    # Aceita a conexão do cliente. O programa fica parado aqui até um cliente se conectar.
+    # O programa fica parado aqui até um cliente se conectar.
     conn, addr = s.accept()
     
     with conn:
