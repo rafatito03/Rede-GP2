@@ -1,4 +1,5 @@
 import socket
+import sem_falha
 HOST = '127.0.0.1'  
 PORT = 65432        
 # Escolha do modo de operação 
@@ -26,6 +27,16 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         dados_recebidos = s.recv(1024)
         
         print(f"Resposta recebida: '{dados_recebidos.decode()}'")
+
+        while True:
+            mensagem = input("Digite uma mensagem para enviar ao servidor: ")
+            if mensagem.lower() == 'end':
+                print("Encerrando a comunicação com o servidor.")
+                break
+            
+            sem_falha.mandar_mensagem(mensagem, s)
+
+
 
     except ConnectionRefusedError:
         print("Falha na conexão. O servidor parece estar offline ou recusou a conexão.")
