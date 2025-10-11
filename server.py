@@ -1,5 +1,5 @@
 import socket
-import sem_falha
+import funcoes
 
 # Configurações do servidor
 HOST = '127.0.0.1'  
@@ -38,13 +38,13 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             resposta = "CONFIRMADO: Handshake recebido e parâmetros definidos."
             conn.sendall(resposta.encode())
             while True:
-                mensagem_recebida = sem_falha.receber_mensagem(conn)
+                mensagem_recebida = funcoes.receber_mensagem(conn)
                 if mensagem_recebida is None:
                     print("Conexão encerrada pelo cliente.")
                     break
                 print(f"Mensagem recebida do cliente: '{mensagem_recebida}'")
                 resposta_mensagem = f"Servidor recebeu: '{mensagem_recebida}'"
-                sem_falha.mandar_mensagem(resposta_mensagem, conn)
+                funcoes.mandar_mensagem(resposta_mensagem, conn)
     
         except (IndexError, ValueError):
             print("Erro: A mensagem de handshake do cliente está em um formato inválido.")

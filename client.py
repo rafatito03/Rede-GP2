@@ -1,5 +1,5 @@
 import socket
-import sem_falha
+import funcoes
 HOST = '127.0.0.1'  
 PORT = 65432        
 # Escolha do modo de operação 
@@ -33,8 +33,8 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             if mensagem.lower() == 'end':
                 print("Encerrando a comunicação com o servidor.")
                 break
-            
-            sem_falha.mandar_mensagem(mensagem, s)
+
+            funcoes.mandar_mensagem(mensagem, s)
 
 
 
