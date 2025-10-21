@@ -1,0 +1,6 @@
+# Arquivos gerados pelo Python
+__pycache__/
+*.pyc
+
+# Ambiente virtual (baseado no seu README)
+venv/
