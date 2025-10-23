@@ -4,8 +4,7 @@ import funcoes
 HOST = '127.0.0.1'  
 PORT = 65432      
 modo_de_operacao_escolhido = "GBN"
-tamanho_maximo_da_comunicacao = 500
-TAMANHO_PAYLOAD = 4
+tamanho_maximo_da_comunicacao = 500 
 
 print("--- Aplicação Cliente ---")
 
@@ -15,7 +14,6 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.connect((HOST, PORT))
         print("Conectado")
         
-        # 1. Receber a chave de criptografia do servidor
         chave_simetrica = s.recv(1024)
         if not chave_simetrica:
             raise ConnectionError("Não foi possível receber a chave do servidor.")
@@ -26,20 +24,48 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         print(f"Mensagem de handshake criptografada enviada para o servidor.")
         
         resposta_servidor = funcoes.receber_mensagem_criptografada(s, chave_simetrica)
-        print(f"Resposta criptografada recebida: '{resposta_servidor}'")
+        print(f"Resposta de handshake recebida: '{resposta_servidor}'")
 
-        # --- LÓGICA DE ENVIO DE PACOTES IMPLEMENTADA ---
+        
+        parametros_servidor = {}
+        try:
+            partes = resposta_servidor.split(';')
+            for parte in partes:
+                if '=' in parte:
+                    chave, valor = parte.split('=', 1)
+                    parametros_servidor[chave] = valor
+        except Exception as e:
+            raise ValueError(f"Falha ao parsear resposta do servidor: {e}")
+        if "STATUS" not in parametros_servidor or parametros_servidor["STATUS"] not in ("OK", "ADJUSTED"):
+            motivo = parametros_servidor.get("REASON", "DESCONHECIDO")
+            raise ConnectionError(f"Servidor rejeitou o handshake. Status: {parametros_servidor.get('STATUS')}, Motivo: {motivo}")
+
+        tamanho_payload_negociado = int(parametros_servidor["PAYLOAD"])
+        tamanho_maximo_negociado = int(parametros_servidor["MAX"])
+        tamanho_janela_negociado = int(parametros_servidor["WINDOW"])
+        
+        print("\n--- Handshake com servidor BEM-SUCEDIDO ---")
+        print(f"Modo: {parametros_servidor['MODE']}")
+        print(f"Tamanho Máx. (Final): {tamanho_maximo_negociado}")
+        print(f"Tamanho Payload (Definido pelo Servidor): {tamanho_payload_negociado}")
+        print(f"Tamanho Janela (Definido pelo Servidor): {tamanho_janela_negociado}")
+        if parametros_servidor["STATUS"] == "ADJUSTED":
+            print(f"Aviso do Servidor: {parametros_servidor['REASON']}")
+
+
         while True:
             mensagem_original = input("\nDigite a mensagem completa para enviar (ou 'end' para sair): ")
             if mensagem_original.lower() == 'end':
                 print("Encerrando a comunicação.")
                 break
 
-            #  Segmentar a mensagem em pacotes com carga útil de 4 caracteres 
-            segmentos = [mensagem_original[i:i+TAMANHO_PAYLOAD] for i in range(0, len(mensagem_original), TAMANHO_PAYLOAD)]
-            print(f"Mensagem dividida em {len(segmentos)} pacotes. Iniciando transmissão...")
+            if len(mensagem_original) > tamanho_maximo_negociado:
+                print(f"Erro: A mensagem é muito longa ({len(mensagem_original)} caracteres). O máximo negociado foi {tamanho_maximo_negociado}.")
+                continue 
 
-            # Enviar cada pacote individualmente e aguardar ACK
+            segmentos = [mensagem_original[i:i+tamanho_payload_negociado] for i in range(0, len(mensagem_original), tamanho_payload_negociado)]
+            print(f"Mensagem dividida em {len(segmentos)} pacotes (Payload: {tamanho_payload_negociado}). Iniciando transmissão...")
+
             for i, payload in enumerate(segmentos):
                 numero_sequencia = i 
                 pacote_para_enviar = f"{numero_sequencia}:{payload}"
@@ -50,7 +76,6 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 ack_recebido = funcoes.receber_mensagem_criptografada(s, chave_simetrica)
                 print(f"<-- Confirmação recebida do servidor: '{ack_recebido}'") 
             
-            # Enviar mensagem de finalização para o servidor saber que a transmissão acabou
             funcoes.mandar_mensagem_criptografada("FIM", s, chave_simetrica)
             print("--- Transmissão da mensagem completa finalizada ---")
 
