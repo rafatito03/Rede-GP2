@@ -34,6 +34,11 @@ Siga os passos abaixo no seu terminal:
         ```bash
         .\venv\Scripts\activate
         ```
+        > **Nota:** Se você estiver usando o PowerShell no Windows e receber um erro sobre a "execução de scripts foi desabilitada" (`UnauthorizedAccess`), execute o seguinte comando primeiro e tente ativar a venv novamente:
+        > ```powershell
+        > Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+        > ```
+
     * **No macOS ou Linux (bash/zsh):**
         ```bash
         source venv/bin/activate
