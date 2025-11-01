@@ -2,132 +2,120 @@ import socket
 import funcoes
 from crypto import gerar_chave
 
-HOST = '127.0.0.1'  
-PORT = 65432      
-TAMANHO_PAYLOAD_SERVIDOR = 4 
-TAMANHO_JANELA = 1           
-TAMANHO_MINIMO_MSG = 30    
+# ===================== CONFIGURAÇÕES =====================
+HOST = '127.0.0.1'
+PORT = 65432
+TAMANHO_PAYLOAD_SERVIDOR = 4
+TAMANHO_JANELA = 5
+TAMANHO_MINIMO_MSG = 30
 
-print("--- Aplicação Servidor ---")
+# ===================== FUNÇÕES AUXILIARES =====================
 
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-    s.bind((HOST, PORT))
-    s.listen()
-    print(f"Servidor pronto e escutando em {HOST}:{PORT}")
-    
-    conn, addr = s.accept()
-    
-    with conn:
-        print(f"Cliente conectado pelo endereço: {addr}")
 
-        
-        chave_simetrica = gerar_chave()
-        conn.sendall(chave_simetrica)
-        print("Chave de criptografia gerada e enviada para o cliente.")
-        
-        
-        mensagem_handshake = funcoes.receber_mensagem_criptografada(conn, chave_simetrica)
-        if mensagem_handshake is None:
-            print("Cliente desconectou durante o handshake.")
-        else:
-            print(f"Mensagem de handshake criptografada recebida: '{mensagem_handshake}'")
-        
-            try:
-                
-                partes = mensagem_handshake.split(';')
-                modo_operacao_cliente = partes[0].split(':')[1]
-                tamanho_maximo_cliente = int(partes[1].split(':')[1])
-                
-                print(f"\n--- Processando Handshake do Cliente ---")
-                print(f"Modo de Operação solicitado: {modo_operacao_cliente}")
-                print(f"Tamanho Máximo solicitado: {tamanho_maximo_cliente}")
 
-                
-                status = "OK"
-                motivo = "N/A"
-                
-                
-                if tamanho_maximo_cliente < TAMANHO_MINIMO_MSG:
-                    print(f"Aviso: Tamanho máximo ({tamanho_maximo_cliente}) ajustado para {TAMANHO_MINIMO_MSG}")
-                    tamanho_maximo_final = TAMANHO_MINIMO_MSG
-                    status = "ADJUSTED"
-                    motivo = "MAX_SIZE_TOO_SMALL"
-                else:
-                    tamanho_maximo_final = tamanho_maximo_cliente
-                
+def processar_handshake(mensagem, chave, conn):
+    """Processa a mensagem de handshake do cliente."""
+    partes = mensagem.split(';')
+    modo = partes[0].split(':')[1]
+    tamanho = int(partes[1].split(':')[1])
+    print(f"[HANDSHAKE] Cliente solicitou modo {modo}, tamanho máximo {tamanho}")
 
-                
-                modo_operacao_final = modo_operacao_cliente 
-                
-                print("\n--- Parâmetros Finais Definidos ---")
-                print(f"Modo: {modo_operacao_final}")
-                print(f"Tamanho Máx.: {tamanho_maximo_final}")
-                print(f"Payload: {TAMANHO_PAYLOAD_SERVIDOR}")
-                print(f"Janela: {TAMANHO_JANELA}")
-                print(f"Status: {status}")
+    status = "OK"
+    motivo = "N/A"
 
-                resposta = (
-                    f"HELLO-ACK;"
-                    f"MODE={modo_operacao_final};"
-                    f"MAX={tamanho_maximo_final};"
-                    f"PAYLOAD={TAMANHO_PAYLOAD_SERVIDOR};"
-                    f"WINDOW={TAMANHO_JANELA};"
-                    f"STATUS={status};"
-                    f"REASON={motivo}"
-                )
-                
-                funcoes.mandar_mensagem_criptografada(resposta, conn, chave_simetrica)
-                print("Resposta estruturada do handshake enviada.")
-                
-                while True: 
-                    print("\n--- Aguardando nova transmissão do cliente ---")
-                    mensagem_completa = []
-                    seq_num_esperado = 0
+    if tamanho < TAMANHO_MINIMO_MSG:
+        tamanho_final = TAMANHO_MINIMO_MSG
+        status = "ADJUSTED"
+        motivo = "MAX_SIZE_TOO_SMALL"
+        print(f"[HANDSHAKE] Tamanho ajustado para {tamanho_final}")
+    else:
+        tamanho_final = tamanho
 
-                    while True: 
-                        pacote_recebido = funcoes.receber_mensagem_criptografada(conn, chave_simetrica)
-                        
-                        if pacote_recebido is None: 
-                            break
-                        
-                        if pacote_recebido == "FIM":
-                            break
+    resposta = (
+        f"HELLO-ACK;"
+        f"MODE={modo};"
+        f"MAX={tamanho_final};"
+        f"PAYLOAD={TAMANHO_PAYLOAD_SERVIDOR};"
+        f"WINDOW={TAMANHO_JANELA};"
+        f"STATUS={status};"
+        f"REASON={motivo}"
+    )
+    funcoes.mandar_mensagem_criptografada(resposta, conn, chave)
+    print("[SERVIDOR→CLIENTE] Resposta de handshake enviada.")
+    return modo, tamanho_final
 
-                        
-                        try:
-                            seq_num_str, payload = pacote_recebido.split(':', 1)
-                            seq_num_recebido = int(seq_num_str)
-                            
-                            print(f"<-- Pacote recebido. Metadados: [Seq={seq_num_recebido}, Carga='{payload}']")
-                            
-                            
-                            if seq_num_recebido == seq_num_esperado:
-                                mensagem_completa.append(payload)
-                                
-                                ack = f"ACK:{seq_num_recebido}"
-                                funcoes.mandar_mensagem_criptografada(ack, conn, chave_simetrica)
-                                print(f"--> Confirmação enviada para pacote {seq_num_recebido}")
-                                
-                                seq_num_esperado += 1
-                            else:
-                                print(f"Pacote fora de ordem recebido. Esperado: {seq_num_esperado}, Recebido: {seq_num_recebido}.")
-                                
-                                ack_anterior = f"ACK:{seq_num_esperado - 1}"
-                                funcoes.mandar_mensagem_criptografada(ack_anterior, conn, chave_simetrica)
+def processar_pacote(pacote, seq_esperado, chave, conn):
+    """Valida o pacote recebido e retorna o novo número esperado."""
+    partes = pacote.split(':', 2)
+    if len(partes) != 3:
+        print(f"[ERRO] Pacote mal formatado: '{pacote}'")
+        return seq_esperado
 
-                        except ValueError:
-                            print(f"Erro ao processar o pacote: '{pacote_recebido}'")
+    seq, chk, payload = int(partes[0]), int(partes[1]), partes[2]
+    payload_bytes = payload.encode('utf-8')
 
-                    if not mensagem_completa: 
+    print(f"[CLIENTE→SERVIDOR] Pacote recebido [Seq={seq}, Chk={chk}, Carga='{payload}']")
+
+    if not funcoes.verificar_checksum(payload_bytes, chk):
+        print(f"[ERRO] Checksum inválido no pacote {seq}.")
+        funcoes.mandar_mensagem_criptografada(f"NAK:{seq}", conn, chave)
+        print(f"[SERVIDOR→CLIENTE] NAK enviado para {seq}")
+        return seq_esperado
+
+    if seq == seq_esperado:
+        funcoes.mandar_mensagem_criptografada(f"ACK:{seq}", conn, chave)
+        print(f"[SERVIDOR→CLIENTE] ACK enviado para {seq}")
+        return seq_esperado + 1
+    else:
+        print(f"[AVISO] Pacote fora de ordem. Esperado {seq_esperado}, recebido {seq}.")
+        if seq_esperado > 0:
+            funcoes.mandar_mensagem_criptografada(f"ACK:{seq_esperado-1}", conn, chave)
+            print(f"[SERVIDOR→CLIENTE] ACK reenviado para {seq_esperado-1}")
+        return seq_esperado
+
+def main():
+    print("--- Aplicação Servidor ---")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((HOST, PORT))
+        s.listen()
+        print(f"Servidor escutando em {HOST}:{PORT}")
+
+        conn, addr = s.accept()
+        with conn:
+            print(f"Cliente conectado: {addr}")
+
+            chave = gerar_chave()
+            conn.sendall(chave)
+            print("Chave de criptografia enviada.")
+
+            handshake = funcoes.receber_mensagem_criptografada(conn, chave)
+            if handshake is None:
+                print("Cliente desconectou no handshake.")
+                return
+
+            modo, tamanho_final = processar_handshake(handshake, chave, conn)
+
+            while True:
+                print("\n[Aguardando nova transmissão]")
+                mensagem = []
+                seq_esperado = 0
+
+                while True:
+                    pacote = funcoes.receber_mensagem_criptografada(conn, chave)
+                    if pacote is None:
+                        return
+                    if pacote == "FIM":
                         break
 
-                    texto_final = "".join(mensagem_completa)
-                    print("\n--- Comunicação Completa Recebida ---")
-                    print(f"Mensagem reconstruída com sucesso: '{texto_final}'")
-            
-            except Exception as e:
-                print(f"Ocorreu um erro no processamento: {e}")
-                
-        print("\nFinalizando conexão com este cliente.")
+                    seq_esperado = processar_pacote(pacote, seq_esperado, chave, conn)
+                    mensagem.append(pacote.split(':', 2)[2])
 
-print("Servidor finalizado.")
+                if mensagem:
+                    texto_final = "".join(mensagem)
+                    print("\n--- Comunicação completa recebida ---")
+                    print(f"Mensagem reconstruída: '{texto_final}'")
+
+            print("Conexão encerrada.")
+
+if __name__ == "__main__":
+    main()

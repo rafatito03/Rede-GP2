@@ -1,88 +1,145 @@
 import socket
 import funcoes
 
-HOST = '127.0.0.1'  
-PORT = 65432      
+# ===================== CONFIGURAÇÕES =====================
+HOST = '127.0.0.1'
+PORT = 65432
 modo_de_operacao_escolhido = "GBN"
-tamanho_maximo_da_comunicacao = 500 
+tamanho_maximo_da_comunicacao = 500
+TIMEOUT_SEGUNDOS = 3
 
-print("--- Aplicação Cliente ---")
+# ===================== FUNÇÕES AUXILIARES =====================
 
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-    try:
-        print(f"Conectando ao servidor em {HOST}:{PORT}...")
-        s.connect((HOST, PORT))
-        print("Conectado")
-        
-        chave_simetrica = s.recv(1024)
-        if not chave_simetrica:
-            raise ConnectionError("Não foi possível receber a chave do servidor.")
-        print("Chave de criptografia recebida do servidor.")
 
-        mensagem_handshake = f"MODO:{modo_de_operacao_escolhido};TAMANHO_MAXIMO:{tamanho_maximo_da_comunicacao}"
-        funcoes.mandar_mensagem_criptografada(mensagem_handshake, s, chave_simetrica)
-        print(f"Mensagem de handshake criptografada enviada para o servidor.")
-        
-        resposta_servidor = funcoes.receber_mensagem_criptografada(s, chave_simetrica)
-        print(f"Resposta de handshake recebida: '{resposta_servidor}'")
+def realizar_handshake(socket_conexao, chave_simetrica):
+    """Envia e processa o handshake com o servidor."""
+    mensagem_handshake = f"MODO:{modo_de_operacao_escolhido};TAMANHO_MAXIMO:{tamanho_maximo_da_comunicacao}"
+    funcoes.mandar_mensagem_criptografada(mensagem_handshake, socket_conexao, chave_simetrica)
+    print("[CLIENTE→SERVIDOR] Handshake enviado.")
+    
+    resposta = funcoes.receber_mensagem_criptografada(socket_conexao, chave_simetrica)
+    if resposta is None:
+        raise ConnectionError("Servidor fechou a conexão durante o handshake.")
+    print(f"[SERVIDOR→CLIENTE] Handshake recebido: '{resposta}'")
+    return resposta
 
-        
-        parametros_servidor = {}
+def interpretar_handshake(resposta_servidor):
+    """Interpreta os parâmetros recebidos no handshake do servidor."""
+    parametros = {}
+    partes = resposta_servidor.split(';')
+    for parte in partes:
+        if '=' in parte:
+            chave, valor = parte.split('=', 1)
+            parametros[chave] = valor
+    return parametros
+
+def enviar_segmentos_GBN(segmentos, janela, socket_conexao, chave_simetrica):
+    """Implementa o envio Go-Back-N."""
+    base = 0
+    next_seq_num = 0
+    N = janela
+    num_segmentos = len(segmentos)
+
+    while base < num_segmentos:
+        # Enviar pacotes dentro da janela
+        while next_seq_num < base + N and next_seq_num < num_segmentos:
+            payload = segmentos[next_seq_num]
+            payload_bytes = payload.encode('utf-8')
+            checksum = funcoes.calcular_checksum(payload_bytes)
+            pacote_para_enviar = f"{next_seq_num}:{checksum}:{payload}"
+            funcoes.mandar_mensagem_criptografada(pacote_para_enviar, socket_conexao, chave_simetrica)
+            print(f"[CLIENTE→SERVIDOR] Pacote {next_seq_num} enviado [Chk={checksum}, Carga='{payload}']")
+            if base == next_seq_num:
+                socket_conexao.settimeout(TIMEOUT_SEGUNDOS)
+                print(f"[TIMER] Iniciado para base {base}.")
+            next_seq_num += 1
+
+        # Esperar ACK/NAK
         try:
-            partes = resposta_servidor.split(';')
-            for parte in partes:
-                if '=' in parte:
-                    chave, valor = parte.split('=', 1)
-                    parametros_servidor[chave] = valor
+            ack_recebido = funcoes.receber_mensagem_criptografada(socket_conexao, chave_simetrica)
+            if not ack_recebido:
+                raise ConnectionError("Servidor desconectou.")
+
+            print(f"[SERVIDOR→CLIENTE] Recebido: '{ack_recebido}'")
+
+            if ack_recebido.startswith("NAK:"):
+                seq_num = int(ack_recebido.split(':')[1])
+                print(f"[CONTROLE] NAK para {seq_num}. Retransmitindo janela.")
+                socket_conexao.settimeout(None)
+                next_seq_num = base
+                continue
+
+            elif ack_recebido.startswith("ACK:"):
+                seq_num_ack = int(ack_recebido.split(':')[1])
+                base = seq_num_ack + 1
+                print(f"[CONTROLE] ACK:{seq_num_ack}. Nova base: {base}")
+
+                if base == next_seq_num:
+                    socket_conexao.settimeout(None)
+                    print("[TIMER] Parado. Janela confirmada.")
+                else:
+                    socket_conexao.settimeout(TIMEOUT_SEGUNDOS)
+                    print(f"[TIMER] Reiniciado para base {base}.")
+
+            else:
+                print(f"[AVISO] Formato inesperado de ACK: '{ack_recebido}'")
+
+        except socket.timeout:
+            print(f"[ERRO/TIMEOUT] ACK não recebido para base {base}. Retransmitindo janela.")
+            socket_conexao.settimeout(None)
+            next_seq_num = base
+
+def main():
+    print("--- Aplicação Cliente ---")
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            print(f"Conectando ao servidor em {HOST}:{PORT}...")
+            s.connect((HOST, PORT))
+            print("Conectado com sucesso.")
+
+            chave_simetrica = s.recv(1024)
+            if not chave_simetrica:
+                raise ConnectionError("Não foi possível receber a chave do servidor.")
+            print("Chave de criptografia recebida.")
+
+            resposta = realizar_handshake(s, chave_simetrica)
+            parametros = interpretar_handshake(resposta)
+
+            if "STATUS" not in parametros or parametros["STATUS"] not in ("OK", "ADJUSTED"):
+                raise ConnectionError(f"Servidor rejeitou o handshake. Motivo: {parametros.get('REASON', 'DESCONHECIDO')}")
+
+            payload_tam = int(parametros["PAYLOAD"])
+            max_tam = int(parametros["MAX"])
+            janela = int(parametros["WINDOW"])
+
+            print("\n--- Handshake com servidor bem-sucedido ---")
+            print(f"Modo: {parametros['MODE']}")
+            print(f"Tamanho Máximo: {max_tam}")
+            print(f"Payload: {payload_tam}")
+            print(f"Janela: {janela}")
+
+            while True:
+                msg = input("\nDigite a mensagem (ou 'end' para sair): ")
+                if msg.lower() == 'end':
+                    print("Encerrando comunicação.")
+                    break
+
+                if len(msg) > max_tam:
+                    print(f"Mensagem excede o máximo ({len(msg)}>{max_tam}).")
+                    continue
+
+                segmentos = [msg[i:i+payload_tam] for i in range(0, len(msg), payload_tam)]
+                print(f"Mensagem dividida em {len(segmentos)} pacotes. Enviando...")
+                enviar_segmentos_GBN(segmentos, janela, s, chave_simetrica)
+
+                funcoes.mandar_mensagem_criptografada("FIM", s, chave_simetrica)
+                print("--- Transmissão finalizada ---")
+
         except Exception as e:
-            raise ValueError(f"Falha ao parsear resposta do servidor: {e}")
-        if "STATUS" not in parametros_servidor or parametros_servidor["STATUS"] not in ("OK", "ADJUSTED"):
-            motivo = parametros_servidor.get("REASON", "DESCONHECIDO")
-            raise ConnectionError(f"Servidor rejeitou o handshake. Status: {parametros_servidor.get('STATUS')}, Motivo: {motivo}")
+            print(f"Erro: {e}")
 
-        tamanho_payload_negociado = int(parametros_servidor["PAYLOAD"])
-        tamanho_maximo_negociado = int(parametros_servidor["MAX"])
-        tamanho_janela_negociado = int(parametros_servidor["WINDOW"])
-        
-        print("\n--- Handshake com servidor BEM-SUCEDIDO ---")
-        print(f"Modo: {parametros_servidor['MODE']}")
-        print(f"Tamanho Máx. (Final): {tamanho_maximo_negociado}")
-        print(f"Tamanho Payload (Definido pelo Servidor): {tamanho_payload_negociado}")
-        print(f"Tamanho Janela (Definido pelo Servidor): {tamanho_janela_negociado}")
-        if parametros_servidor["STATUS"] == "ADJUSTED":
-            print(f"Aviso do Servidor: {parametros_servidor['REASON']}")
+    print("Cliente finalizado.")
 
-
-        while True:
-            mensagem_original = input("\nDigite a mensagem completa para enviar (ou 'end' para sair): ")
-            if mensagem_original.lower() == 'end':
-                print("Encerrando a comunicação.")
-                break
-
-            if len(mensagem_original) > tamanho_maximo_negociado:
-                print(f"Erro: A mensagem é muito longa ({len(mensagem_original)} caracteres). O máximo negociado foi {tamanho_maximo_negociado}.")
-                continue 
-
-            segmentos = [mensagem_original[i:i+tamanho_payload_negociado] for i in range(0, len(mensagem_original), tamanho_payload_negociado)]
-            print(f"Mensagem dividida em {len(segmentos)} pacotes (Payload: {tamanho_payload_negociado}). Iniciando transmissão...")
-
-            for i, payload in enumerate(segmentos):
-                numero_sequencia = i 
-                pacote_para_enviar = f"{numero_sequencia}:{payload}"
-
-                funcoes.mandar_mensagem_criptografada(pacote_para_enviar, s, chave_simetrica)
-                print(f"--> Pacote {numero_sequencia} enviado com dados: '{payload}'")
-
-                ack_recebido = funcoes.receber_mensagem_criptografada(s, chave_simetrica)
-                print(f"<-- Confirmação recebida do servidor: '{ack_recebido}'") 
-            
-            funcoes.mandar_mensagem_criptografada("FIM", s, chave_simetrica)
-            print("--- Transmissão da mensagem completa finalizada ---")
-
-
-    except ConnectionRefusedError:
-        print("Falha na conexão. O servidor parece estar offline ou recusou a conexão.")
-    except Exception as error:
-        print(f"Ocorreu um erro inesperado: {error}")
-
-print("Cliente finalizado.")
+if __name__ == "__main__":
+    main()
