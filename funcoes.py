@@ -44,8 +44,10 @@ def receber_mensagem_criptografada(conexao_socket: socket.socket, chave: bytes) 
     
     return mensagem_descriptografada_bytes.decode('utf-8')
 
-#CHECKSUM
 
+
+
+def calcular_checksum(dados: bytes) -> int:
     if len(dados) % 2 != 0:
         dados += b'\0'
 
@@ -53,11 +55,10 @@ def receber_mensagem_criptografada(conexao_socket: socket.socket, chave: bytes) 
     for i in range(0, len(dados), 2):
         palavra = (dados[i] << 8) + dados[i+1]
         soma += palavra
-        
+
         soma = (soma & 0xFFFF) + (soma >> 16)
 
     return (~soma) & 0xFFFF
-
 def verificar_checksum(dados: bytes, checksum_recebido: int) -> bool:
     checksum_calculado = calcular_checksum(dados)
     return checksum_calculado == checksum_recebido

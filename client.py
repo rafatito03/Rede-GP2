@@ -1,10 +1,11 @@
 import socket
 import funcoes
+import time
 
 # ===================== CONFIGURAÇÕES =====================
 HOST = '127.0.0.1'
 PORT = 65432
-modo_de_operacao_escolhido = "GBN"
+modo_de_operacao_escolhido = "SR"
 tamanho_maximo_da_comunicacao = 500
 TIMEOUT_SEGUNDOS = 3
 
@@ -89,6 +90,93 @@ def enviar_segmentos_GBN(segmentos, janela, socket_conexao, chave_simetrica):
             socket_conexao.settimeout(None)
             next_seq_num = base
 
+
+def enviar_segmentos_SR(segmentos, janela, socket_conexao, chave_simetrica):
+    """Implementa o envio Selective Repeat."""
+    base = 0
+    next_seq_num = 0
+    N = janela
+    num_segmentos = len(segmentos)
+    
+    # Dicionário de pacotes enviados mas não confirmados
+    # Formato: {seq: (timestamp, pacote_str)}
+    pacotes_em_transito = {}
+    
+    # Define um timeout curto para o socket não bloquear o loop
+    socket_conexao.settimeout(0.1) # 100ms
+    
+    while base < num_segmentos:
+        agora = time.time()
+
+        # 1. Enviar pacotes novos (se a janela permitir)
+        while next_seq_num < base + N and next_seq_num < num_segmentos:
+            payload = segmentos[next_seq_num]
+            payload_bytes = payload.encode('utf-8')
+            checksum = funcoes.calcular_checksum(payload_bytes)
+            pacote_para_enviar = f"{next_seq_num}:{checksum}:{payload}"
+            
+            funcoes.mandar_mensagem_criptografada(pacote_para_enviar, socket_conexao, chave_simetrica)
+            print(f"[CLIENTE→SERVIDOR/SR] Pacote {next_seq_num} enviado [Chk={checksum}]")
+            
+            # Armazena para timer e retransmissão
+            pacotes_em_transito[next_seq_num] = (agora, pacote_para_enviar)
+            next_seq_num += 1
+
+        # 2. Verificar ACKs/NAKs recebidos
+        try:
+            resposta = funcoes.receber_mensagem_criptografada(socket_conexao, chave_simetrica)
+            if not resposta:
+                raise ConnectionError("Servidor desconectou.")
+
+            print(f"[SERVIDOR→CLIENTE/SR] Recebido: '{resposta}'")
+
+            if resposta.startswith("ACK:"):
+                seq_ack = int(resposta.split(':')[1])
+                
+                # Se o ACK é para um pacote em trânsito, remova-o
+                if seq_ack in pacotes_em_transito:
+                    del pacotes_em_transito[seq_ack]
+                    print(f"[CONTROLE/SR] ACK {seq_ack} confirmado.")
+                
+                # Tenta avançar a base (o ponto inicial da janela)
+                if seq_ack == base:
+                    # Avança a base para o primeiro pacote ainda não confirmado
+                    while base < num_segmentos and base not in pacotes_em_transito:
+                        if base >= next_seq_num: break
+                        base += 1
+                    print(f"[CONTROLE/SR] Nova base: {base}")
+
+            elif resposta.startswith("NAK:"):
+                seq_nak = int(resposta.split(':')[1])
+                if seq_nak in pacotes_em_transito:
+                    print(f"[CONTROLE/SR] NAK para {seq_nak}. Retransmitindo imediatamente.")
+                    _, pacote_str = pacotes_em_transito[seq_nak]
+                    funcoes.mandar_mensagem_criptografada(pacote_str, socket_conexao, chave_simetrica)
+                    # Resetar o timer
+                    pacotes_em_transito[seq_nak] = (agora, pacote_str)
+
+        except socket.timeout:
+            # Isso é normal e esperado! Significa que não há ACKs/NAKs no buffer.
+            pass
+        except Exception as e:
+            print(f"Erro ao receber ACK: {e}")
+            break
+
+        # 3. Verificar timeouts (retransmissão seletiva)
+        # É importante usar list() para poder modificar o dicionário durante a iteração
+        for seq, (timestamp, pacote_str) in list(pacotes_em_transito.items()):
+            if agora - timestamp > TIMEOUT_SEGUNDOS:
+                if seq < base + N: # Apenas retransmite se ainda estiver na janela
+                    print(f"[ERRO/TIMEOUT/SR] Pacote {seq} estourou. Retransmitindo.")
+                    funcoes.mandar_mensagem_criptografada(pacote_str, socket_conexao, chave_simetrica)
+                    # Resetar o timer
+                    pacotes_em_transito[seq] = (agora, pacote_str)
+
+    # Fim do loop, restaura o timeout normal (bloqueante)
+    socket_conexao.settimeout(None)
+
+
+
 def main():
     print("--- Aplicação Cliente ---")
 
@@ -131,7 +219,15 @@ def main():
 
                 segmentos = [msg[i:i+payload_tam] for i in range(0, len(msg), payload_tam)]
                 print(f"Mensagem dividida em {len(segmentos)} pacotes. Enviando...")
-                enviar_segmentos_GBN(segmentos, janela, s, chave_simetrica)
+                modo_operacao = parametros.get("MODE", "GBN") # Pega o modo do handshake
+                
+                if modo_operacao == "GBN":
+                    enviar_segmentos_GBN(segmentos, janela, s, chave_simetrica)
+                elif modo_operacao == "SR":
+                    enviar_segmentos_SR(segmentos, janela, s, chave_simetrica)
+                else:
+                    print(f"ERRO: Modo '{modo_operacao}' desconhecido. Usando GBN por padrão.")
+                    enviar_segmentos_GBN(segmentos, janela, s, chave_simetrica)
 
                 funcoes.mandar_mensagem_criptografada("FIM", s, chave_simetrica)
                 print("--- Transmissão finalizada ---")
