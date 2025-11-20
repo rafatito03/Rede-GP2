@@ -5,57 +5,54 @@ import time
 # ===================== CONFIGURAÇÕES =====================
 HOST = '127.0.0.1'
 PORT = 65432
-modo_de_operacao_escolhido = "SR"
-tamanho_maximo_da_comunicacao = 500
 TIMEOUT_SEGUNDOS = 3
 
-# ===================== FUNÇÕES AUXILIARES =====================
+# ===================== FUNÇÕES DE ENVIO (GBN e SR) =====================
 
-
-def realizar_handshake(socket_conexao, chave_simetrica):
-    """Envia e processa o handshake com o servidor."""
-    mensagem_handshake = f"MODO:{modo_de_operacao_escolhido};TAMANHO_MAXIMO:{tamanho_maximo_da_comunicacao}"
-    funcoes.mandar_mensagem_criptografada(mensagem_handshake, socket_conexao, chave_simetrica)
-    print("[CLIENTE→SERVIDOR] Handshake enviado.")
-    
-    resposta = funcoes.receber_mensagem_criptografada(socket_conexao, chave_simetrica)
-    if resposta is None:
-        raise ConnectionError("Servidor fechou a conexão durante o handshake.")
-    print(f"[SERVIDOR→CLIENTE] Handshake recebido: '{resposta}'")
-    return resposta
-
-def interpretar_handshake(resposta_servidor):
-    """Interpreta os parâmetros recebidos no handshake do servidor."""
-    parametros = {}
-    partes = resposta_servidor.split(';')
-    for parte in partes:
-        if '=' in parte:
-            chave, valor = parte.split('=', 1)
-            parametros[chave] = valor
-    return parametros
-
-def enviar_segmentos_GBN(segmentos, janela, socket_conexao, chave_simetrica):
-    """Implementa o envio Go-Back-N."""
+def enviar_segmentos_GBN(segmentos, janela, socket_conexao, chave_simetrica, seq_erro_chk=-1, seq_erro_perda=-1):
+    """Implementa Go-Back-N com injeção de falhas (Checksum e Perda)."""
     base = 0
     next_seq_num = 0
     N = janela
     num_segmentos = len(segmentos)
 
+    # Controle para que o erro ocorra apenas na primeira tentativa
+    erros_chk_pendentes = {seq_erro_chk}
+    erros_perda_pendentes = {seq_erro_perda}
+
     while base < num_segmentos:
-        # Enviar pacotes dentro da janela
+        # 1. Enviar pacotes dentro da janela
         while next_seq_num < base + N and next_seq_num < num_segmentos:
             payload = segmentos[next_seq_num]
             payload_bytes = payload.encode('utf-8')
             checksum = funcoes.calcular_checksum(payload_bytes)
+            
+            # --- SIMULAÇÃO DE ERRO DE CHECKSUM ---
+            if next_seq_num in erros_chk_pendentes:
+                print(f"[SIMULAÇÃO] Corrompendo checksum do pacote {next_seq_num}!")
+                checksum += 1337
+                erros_chk_pendentes.remove(next_seq_num)
+            
             pacote_para_enviar = f"{next_seq_num}:{checksum}:{payload}"
-            funcoes.mandar_mensagem_criptografada(pacote_para_enviar, socket_conexao, chave_simetrica)
-            print(f"[CLIENTE→SERVIDOR] Pacote {next_seq_num} enviado [Chk={checksum}, Carga='{payload}']")
+            
+            # --- SIMULAÇÃO DE PERDA DE PACOTE ---
+            if next_seq_num in erros_perda_pendentes:
+                print(f"[SIMULAÇÃO] PACOTE {next_seq_num} PERDIDO NA REDE (Não enviado)!")
+                erros_perda_pendentes.remove(next_seq_num)
+                # Não enviamos o socket.sendall, mas a lógica continua como se tivesse enviado
+            else:
+                funcoes.mandar_mensagem_criptografada(pacote_para_enviar, socket_conexao, chave_simetrica)
+                print(f"[CLIENTE→SERVIDOR] Pacote {next_seq_num} enviado.")
+
+            # Lógica do Timer do GBN
             if base == next_seq_num:
                 socket_conexao.settimeout(TIMEOUT_SEGUNDOS)
+                # Se perdemos o pacote base, o timer começa mesmo assim
                 print(f"[TIMER] Iniciado para base {base}.")
+                
             next_seq_num += 1
 
-        # Esperar ACK/NAK
+        # 2. Esperar ACK/NAK
         try:
             ack_recebido = funcoes.receber_mensagem_criptografada(socket_conexao, chave_simetrica)
             if not ack_recebido:
@@ -65,9 +62,9 @@ def enviar_segmentos_GBN(segmentos, janela, socket_conexao, chave_simetrica):
 
             if ack_recebido.startswith("NAK:"):
                 seq_num = int(ack_recebido.split(':')[1])
-                print(f"[CONTROLE] NAK para {seq_num}. Retransmitindo janela.")
+                print(f"[CONTROLE] NAK recebido para {seq_num}. Retransmitindo janela.")
                 socket_conexao.settimeout(None)
-                next_seq_num = base
+                next_seq_num = base # Go-Back-N: volta tudo
                 continue
 
             elif ack_recebido.startswith("ACK:"):
@@ -77,13 +74,8 @@ def enviar_segmentos_GBN(segmentos, janela, socket_conexao, chave_simetrica):
 
                 if base == next_seq_num:
                     socket_conexao.settimeout(None)
-                    print("[TIMER] Parado. Janela confirmada.")
                 else:
                     socket_conexao.settimeout(TIMEOUT_SEGUNDOS)
-                    print(f"[TIMER] Reiniciado para base {base}.")
-
-            else:
-                print(f"[AVISO] Formato inesperado de ACK: '{ack_recebido}'")
 
         except socket.timeout:
             print(f"[ERRO/TIMEOUT] ACK não recebido para base {base}. Retransmitindo janela.")
@@ -91,91 +83,118 @@ def enviar_segmentos_GBN(segmentos, janela, socket_conexao, chave_simetrica):
             next_seq_num = base
 
 
-def enviar_segmentos_SR(segmentos, janela, socket_conexao, chave_simetrica):
-    """Implementa o envio Selective Repeat."""
+def enviar_segmentos_SR(segmentos, janela, socket_conexao, chave_simetrica, seq_erro_chk=-1, seq_erro_perda=-1):
+    """Implementa Selective Repeat com injeção de falhas."""
     base = 0
     next_seq_num = 0
     N = janela
     num_segmentos = len(segmentos)
     
-    # Dicionário de pacotes enviados mas não confirmados
-    # Formato: {seq: (timestamp, pacote_str)}
-    pacotes_em_transito = {}
+    pacotes_em_transito = {} # {seq: (timestamp, pacote_pronto, payload_orig)}
+    erros_chk_pendentes = {seq_erro_chk}
+    erros_perda_pendentes = {seq_erro_perda}
     
-    # Define um timeout curto para o socket não bloquear o loop
-    socket_conexao.settimeout(0.1) # 100ms
+    socket_conexao.settimeout(0.1) 
     
     while base < num_segmentos:
         agora = time.time()
 
-        # 1. Enviar pacotes novos (se a janela permitir)
+        # 1. Enviar pacotes novos
         while next_seq_num < base + N and next_seq_num < num_segmentos:
             payload = segmentos[next_seq_num]
             payload_bytes = payload.encode('utf-8')
             checksum = funcoes.calcular_checksum(payload_bytes)
+
+            # Simulação Checksum
+            if next_seq_num in erros_chk_pendentes:
+                print(f"[SIMULAÇÃO] Corrompendo checksum do pacote {next_seq_num}!")
+                checksum += 1337
+                erros_chk_pendentes.remove(next_seq_num)
+
             pacote_para_enviar = f"{next_seq_num}:{checksum}:{payload}"
             
-            funcoes.mandar_mensagem_criptografada(pacote_para_enviar, socket_conexao, chave_simetrica)
-            print(f"[CLIENTE→SERVIDOR/SR] Pacote {next_seq_num} enviado [Chk={checksum}]")
+            # Guardamos no buffer de trânsito ANTES de enviar (para o timer funcionar mesmo se perder)
+            pacotes_em_transito[next_seq_num] = (agora, pacote_para_enviar, payload)
+
+            # Simulação Perda
+            if next_seq_num in erros_perda_pendentes:
+                print(f"[SIMULAÇÃO] PACOTE {next_seq_num} PERDIDO NA REDE (Não enviado)!")
+                erros_perda_pendentes.remove(next_seq_num)
+            else:
+                funcoes.mandar_mensagem_criptografada(pacote_para_enviar, socket_conexao, chave_simetrica)
+                print(f"[CLIENTE→SERVIDOR/SR] Pacote {next_seq_num} enviado.")
             
-            # Armazena para timer e retransmissão
-            pacotes_em_transito[next_seq_num] = (agora, pacote_para_enviar)
             next_seq_num += 1
 
-        # 2. Verificar ACKs/NAKs recebidos
+        # 2. Verificar ACKs/NAKs
         try:
             resposta = funcoes.receber_mensagem_criptografada(socket_conexao, chave_simetrica)
-            if not resposta:
-                raise ConnectionError("Servidor desconectou.")
+            if resposta:
+                print(f"[SERVIDOR→CLIENTE/SR] Recebido: '{resposta}'")
 
-            print(f"[SERVIDOR→CLIENTE/SR] Recebido: '{resposta}'")
+                if resposta.startswith("ACK:"):
+                    seq_ack = int(resposta.split(':')[1])
+                    if seq_ack in pacotes_em_transito:
+                        del pacotes_em_transito[seq_ack]
+                    
+                    # Avança a base
+                    if seq_ack == base:
+                        while base < num_segmentos and base not in pacotes_em_transito:
+                            if base >= next_seq_num: break
+                            base += 1
 
-            if resposta.startswith("ACK:"):
-                seq_ack = int(resposta.split(':')[1])
-                
-                # Se o ACK é para um pacote em trânsito, remova-o
-                if seq_ack in pacotes_em_transito:
-                    del pacotes_em_transito[seq_ack]
-                    print(f"[CONTROLE/SR] ACK {seq_ack} confirmado.")
-                
-                # Tenta avançar a base (o ponto inicial da janela)
-                if seq_ack == base:
-                    # Avança a base para o primeiro pacote ainda não confirmado
-                    while base < num_segmentos and base not in pacotes_em_transito:
-                        if base >= next_seq_num: break
-                        base += 1
-                    print(f"[CONTROLE/SR] Nova base: {base}")
-
-            elif resposta.startswith("NAK:"):
-                seq_nak = int(resposta.split(':')[1])
-                if seq_nak in pacotes_em_transito:
-                    print(f"[CONTROLE/SR] NAK para {seq_nak}. Retransmitindo imediatamente.")
-                    _, pacote_str = pacotes_em_transito[seq_nak]
-                    funcoes.mandar_mensagem_criptografada(pacote_str, socket_conexao, chave_simetrica)
-                    # Resetar o timer
-                    pacotes_em_transito[seq_nak] = (agora, pacote_str)
+                elif resposta.startswith("NAK:"):
+                    seq_nak = int(resposta.split(':')[1])
+                    print(f"[CONTROLE/SR] NAK para {seq_nak}. Retransmitindo corrigido.")
+                    if seq_nak in pacotes_em_transito:
+                        # Reconstrói pacote limpo
+                        _, _, pl_orig = pacotes_em_transito[seq_nak]
+                        chk_new = funcoes.calcular_checksum(pl_orig.encode('utf-8'))
+                        pkt_new = f"{seq_nak}:{chk_new}:{pl_orig}"
+                        
+                        funcoes.mandar_mensagem_criptografada(pkt_new, socket_conexao, chave_simetrica)
+                        pacotes_em_transito[seq_nak] = (agora, pkt_new, pl_orig)
 
         except socket.timeout:
-            # Isso é normal e esperado! Significa que não há ACKs/NAKs no buffer.
             pass
-        except Exception as e:
-            print(f"Erro ao receber ACK: {e}")
-            break
 
-        # 3. Verificar timeouts (retransmissão seletiva)
-        # É importante usar list() para poder modificar o dicionário durante a iteração
-        for seq, (timestamp, pacote_str) in list(pacotes_em_transito.items()):
+        # 3. Verificar timeouts
+        for seq, (timestamp, _, payload_orig) in list(pacotes_em_transito.items()):
             if agora - timestamp > TIMEOUT_SEGUNDOS:
-                if seq < base + N: # Apenas retransmite se ainda estiver na janela
-                    print(f"[ERRO/TIMEOUT/SR] Pacote {seq} estourou. Retransmitindo.")
-                    funcoes.mandar_mensagem_criptografada(pacote_str, socket_conexao, chave_simetrica)
-                    # Resetar o timer
-                    pacotes_em_transito[seq] = (agora, pacote_str)
+                print(f"[ERRO/TIMEOUT/SR] Pacote {seq} expirou timer. Retransmitindo.")
+                
+                # Sempre retransmite LIMPO após timeout
+                chk_clean = funcoes.calcular_checksum(payload_orig.encode('utf-8'))
+                pkt_clean = f"{seq}:{chk_clean}:{payload_orig}"
+                
+                if seq < base + N:
+                    funcoes.mandar_mensagem_criptografada(pkt_clean, socket_conexao, chave_simetrica)
+                    pacotes_em_transito[seq] = (agora, pkt_clean, payload_orig)
 
-    # Fim do loop, restaura o timeout normal (bloqueante)
     socket_conexao.settimeout(None)
 
+# ===================== FUNÇÕES AUXILIARES =====================
 
+def realizar_handshake(socket_conexao, chave_simetrica, modo_escolhido, tamanho_max):
+    """Faz o handshake com o modo escolhido pelo usuário."""
+    print(f"\n--- Iniciando Handshake ({modo_escolhido}) ---")
+    msg = f"MODO:{modo_escolhido};TAMANHO_MAXIMO:{tamanho_max}"
+    funcoes.mandar_mensagem_criptografada(msg, socket_conexao, chave_simetrica)
+    
+    resposta = funcoes.receber_mensagem_criptografada(socket_conexao, chave_simetrica)
+    return resposta, interpretar_handshake(resposta)
+
+def interpretar_handshake(resposta_servidor):
+    parametros = {}
+    if not resposta_servidor: return parameters
+    partes = resposta_servidor.split(';')
+    for parte in partes:
+        if '=' in parte:
+            chave, valor = parte.split('=', 1)
+            parametros[chave] = valor
+    return parametros
+
+# ===================== MAIN =====================
 
 def main():
     print("--- Aplicação Cliente ---")
@@ -184,58 +203,75 @@ def main():
         try:
             print(f"Conectando ao servidor em {HOST}:{PORT}...")
             s.connect((HOST, PORT))
-            print("Conectado com sucesso.")
-
             chave_simetrica = s.recv(1024)
-            if not chave_simetrica:
-                raise ConnectionError("Não foi possível receber a chave do servidor.")
-            print("Chave de criptografia recebida.")
+            print("Conectado e chave recebida.")
 
-            resposta = realizar_handshake(s, chave_simetrica)
-            parametros = interpretar_handshake(resposta)
-
+            # --- ETAPA 1: ESCOLHA DO MODO (Handshake) ---
+            print("\nSelecione o Protocolo de Transporte:")
+            print("1 - Go-Back-N (GBN)")
+            print("2 - Selective Repeat (SR)")
+            opcao_modo = input("Opção: ")
+            
+            modo_str = "SR" if opcao_modo == "2" else "GBN"
+            
+            # Realiza o handshake com o modo escolhido
+            resposta_hs, parametros = realizar_handshake(s, chave_simetrica, modo_str, 500)
+            
             if "STATUS" not in parametros or parametros["STATUS"] not in ("OK", "ADJUSTED"):
-                raise ConnectionError(f"Servidor rejeitou o handshake. Motivo: {parametros.get('REASON', 'DESCONHECIDO')}")
+                raise ConnectionError("Handshake falhou.")
 
             payload_tam = int(parametros["PAYLOAD"])
-            max_tam = int(parametros["MAX"])
             janela = int(parametros["WINDOW"])
+            
+            print(f"Servidor aceitou modo: {parametros['MODE']}")
+            print(f"Tamanho Payload: {payload_tam} | Janela: {janela}")
 
-            print("\n--- Handshake com servidor bem-sucedido ---")
-            print(f"Modo: {parametros['MODE']}")
-            print(f"Tamanho Máximo: {max_tam}")
-            print(f"Payload: {payload_tam}")
-            print(f"Janela: {janela}")
-
+            # --- ETAPA 2: LOOP DE MENSAGENS ---
             while True:
-                msg = input("\nDigite a mensagem (ou 'end' para sair): ")
-                if msg.lower() == 'end':
-                    print("Encerrando comunicação.")
-                    break
-
-                if len(msg) > max_tam:
-                    print(f"Mensagem excede o máximo ({len(msg)}>{max_tam}).")
-                    continue
+                print("\n" + "="*40)
+                msg = input("Digite a mensagem (ou 'end' para sair): ")
+                if msg.lower() == 'end': break
 
                 segmentos = [msg[i:i+payload_tam] for i in range(0, len(msg), payload_tam)]
-                print(f"Mensagem dividida em {len(segmentos)} pacotes. Enviando...")
-                modo_operacao = parametros.get("MODE", "GBN") # Pega o modo do handshake
+                qtd_pcts = len(segmentos)
+                print(f"Mensagem terá {qtd_pcts} pacotes (IDs 0 a {qtd_pcts-1}).")
+
+                # --- ESCOLHA DE FALHAS ---
+                seq_erro_chk = -1
+                seq_erro_perda = -1
                 
-                if modo_operacao == "GBN":
-                    enviar_segmentos_GBN(segmentos, janela, s, chave_simetrica)
-                elif modo_operacao == "SR":
-                    enviar_segmentos_SR(segmentos, janela, s, chave_simetrica)
+                print("\nDeseja simular falha nesta transmissão?")
+                print("0 - Nenhuma (Envio Perfeito)")
+                print("1 - Erro de Checksum (Integridade)")
+                print("2 - Perda de Pacote (Timeout)")
+                opcao_erro = input("Opção: ")
+
+                if opcao_erro == "1":
+                    try:
+                        seq_erro_chk = int(input(f"Qual ID corromper (0-{qtd_pcts-1})? "))
+                    except: pass
+                elif opcao_erro == "2":
+                    try:
+                        seq_erro_perda = int(input(f"Qual ID perder (0-{qtd_pcts-1})? "))
+                    except: pass
+
+                # --- ENVIO ---
+                print(f"\nIniciando envio via {modo_str}...")
+                
+                if modo_str == "GBN":
+                    enviar_segmentos_GBN(segmentos, janela, s, chave_simetrica, 
+                                         seq_erro_chk=seq_erro_chk, 
+                                         seq_erro_perda=seq_erro_perda)
                 else:
-                    print(f"ERRO: Modo '{modo_operacao}' desconhecido. Usando GBN por padrão.")
-                    enviar_segmentos_GBN(segmentos, janela, s, chave_simetrica)
+                    enviar_segmentos_SR(segmentos, janela, s, chave_simetrica, 
+                                        seq_erro_chk=seq_erro_chk, 
+                                        seq_erro_perda=seq_erro_perda)
 
                 funcoes.mandar_mensagem_criptografada("FIM", s, chave_simetrica)
-                print("--- Transmissão finalizada ---")
+                print("--- Transmissão Finalizada ---")
 
         except Exception as e:
-            print(f"Erro: {e}")
-
-    print("Cliente finalizado.")
+            print(f"Erro fatal: {e}")
 
 if __name__ == "__main__":
     main()
